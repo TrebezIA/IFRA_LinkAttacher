@@ -3,24 +3,20 @@
 <package format="3">
   <name>ros2_linkattacher</name>
   <version>0.0.0</version>
-  <description>IFRA-Cranfield (Cranfield University, UK). Package: ROS 2 LinkAttacher for Gazebo Simulation</description>
+  <description>IFRA-Cranfield LinkAttacher plugin ported to Gazebo Harmonic (gz-sim 8)</description>
 
   <author>Mikel Bueno Viso</author>
   <maintainer email="Mikel.Bueno-Viso@cranfield.ac.uk">Mikel Bueno Viso</maintainer>
-  
+
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
-  <depend>gazebo_ros</depend>
-  <depend>gazebo_dev</depend>
-  <depend>gazebo_msgs</depend>
   <depend>rclcpp</depend>
-  
   <build_depend>linkattacher_msgs</build_depend>
+
+  <!-- Gazebo Harmonic; rosdep key varies by distro — gz-sim is provided by
+       the ros-jazzy-ros-gz meta-package so no explicit rosdep entry needed. -->
 
   <export>
     <build_type>ament_cmake</build_type>
