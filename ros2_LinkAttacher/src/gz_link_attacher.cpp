@@ -12,12 +12,12 @@
 #include <gz/sim/Entity.hh>
 #include <gz/sim/EntityComponentManager.hh>
 #include <gz/sim/EventManager.hh>
+#include <gz/sim/Util.hh>
 #include <gz/sim/components/Link.hh>
 #include <gz/sim/components/Model.hh>
 #include <gz/sim/components/Name.hh>
 #include <gz/sim/components/ParentEntity.hh>
 #include <gz/sim/components/World.hh>
-#include <gz/sim/components/Pose.hh>
 #include <gz/sim/components/PoseCmd.hh>
 
 #include <linkattacher_msgs/srv/attach_link.hpp>
@@ -78,13 +78,6 @@ static Entity findLinkUnder(
             return true;
         });
     return result;
-}
-
-static void ensureWorldPose(EntityComponentManager & ecm, Entity e)
-{
-    if (!ecm.Component<components::WorldPose>(e)) {
-        ecm.CreateComponent(e, components::WorldPose());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,21 +214,16 @@ void GzLinkAttacher::processAttach(
         return;
     }
 
-    ensureWorldPose(ecm, l1);
-    ensureWorldPose(ecm, m2);
-
-    auto * l1Pose = ecm.Component<components::WorldPose>(l1);
-    auto * m2Pose = ecm.Component<components::WorldPose>(m2);
-    if (!l1Pose || !m2Pose) {
-        // Poses not yet computed — re-queue and retry next step
-        std::lock_guard<std::mutex> lk(impl_->opMtx);
-        impl_->pendingOp = std::move(op);
-        return;
-    }
+    // gz::sim::worldPose() traverses the parent chain using Pose components,
+    // which are updated for all entities including arm links after each physics
+    // step — unlike WorldPose which is not reliably populated for articulated
+    // robot links.
+    gz::math::Pose3d l1WorldPose = gz::sim::worldPose(l1, ecm);
+    gz::math::Pose3d m2WorldPose = gz::sim::worldPose(m2, ecm);
 
     impl_->gripperLinkEntity = l1;
     impl_->boxModelEntity    = m2;
-    impl_->relativeTransform = l1Pose->Data().Inverse() * m2Pose->Data();
+    impl_->relativeTransform = l1WorldPose.Inverse() * m2WorldPose;
     impl_->attached          = true;
 
     op->promise.set_value({true,
@@ -279,11 +267,8 @@ void GzLinkAttacher::PreUpdate(
     // Apply kinematic constraint every step while attached
     if (!impl_->attached) { return; }
 
-    auto * gripperPose =
-        ecm.Component<components::WorldPose>(impl_->gripperLinkEntity);
-    if (!gripperPose) { return; }
-
-    gz::math::Pose3d target = gripperPose->Data() * impl_->relativeTransform;
+    gz::math::Pose3d gripperPose = gz::sim::worldPose(impl_->gripperLinkEntity, ecm);
+    gz::math::Pose3d target = gripperPose * impl_->relativeTransform;
 
     auto * cmd = ecm.Component<components::WorldPoseCmd>(impl_->boxModelEntity);
     if (!cmd) {
