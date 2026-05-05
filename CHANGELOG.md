@@ -31,3 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   robot links driven by ros2_control; `gz::sim::worldPose()` traverses the `Pose`
   component parent chain which is updated every step for all entities, making the
   attached box correctly track the moving arm.
+- `gz_link_attacher.cpp`: on first `PreUpdate` the plugin now scans for every
+  top-level model whose name starts with `box_` and pins each at its spawn world
+  pose via `WorldPoseCmd` every step. This prevents physics drift (contact impulses,
+  residual velocity) entirely independently of SDF gravity or kinematic settings.
+  On detach the locked pose is updated to the final placed position so the box
+  stays wherever the arm put it. Removes reliance on `<kinematic>` SDF tag which
+  was misinterpreted by gz-sim 8 and caused boxes to spawn at the wrong height.
