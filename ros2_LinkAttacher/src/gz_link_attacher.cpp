@@ -5,6 +5,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include <gz/math/Pose3.hh>
@@ -80,6 +81,17 @@ static Entity findLinkUnder(
     return result;
 }
 
+static void upsertWorldPoseCmd(
+    EntityComponentManager & ecm, Entity e, const gz::math::Pose3d & pose)
+{
+    auto * cmd = ecm.Component<components::WorldPoseCmd>(e);
+    if (!cmd) {
+        ecm.CreateComponent(e, components::WorldPoseCmd(pose));
+    } else {
+        cmd->Data() = pose;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pending operation
 // ---------------------------------------------------------------------------
@@ -103,6 +115,13 @@ struct GzLinkAttacherPrivate {
 
     std::mutex opMtx;
     std::unique_ptr<PendingOp> pendingOp;
+
+    // All-box lock state — populated on first PreUpdate; entity → locked world pose.
+    // Every non-attached box is held at its entry here via WorldPoseCmd each step,
+    // so physics settings (gravity, kp) cannot drift them. On detach the entry is
+    // updated to the final placed pose so the box stays where it was put.
+    bool initialized{false};
+    std::unordered_map<Entity, gz::math::Pose3d> boxLockPoses;
 
     // Active attachment state — only accessed in PreUpdate (single-threaded)
     bool attached{false};
@@ -236,7 +255,10 @@ void GzLinkAttacher::processDetach(
     EntityComponentManager & ecm, std::unique_ptr<PendingOp> op)
 {
     if (impl_->attached && impl_->boxModelEntity != kNullEntity) {
-        ecm.RemoveComponent<components::WorldPoseCmd>(impl_->boxModelEntity);
+        // Record the final placed pose so the box stays where the arm put it.
+        gz::math::Pose3d gripperPose = gz::sim::worldPose(impl_->gripperLinkEntity, ecm);
+        gz::math::Pose3d finalPose = gripperPose * impl_->relativeTransform;
+        impl_->boxLockPoses[impl_->boxModelEntity] = finalPose;
     }
     impl_->attached          = false;
     impl_->gripperLinkEntity = kNullEntity;
@@ -249,6 +271,26 @@ void GzLinkAttacher::PreUpdate(
     const UpdateInfo &,
     EntityComponentManager & ecm)
 {
+    // On the first simulation step, lock every top-level model whose name
+    // starts with "box_" at its current world pose via WorldPoseCmd.
+    // This prevents any physics drift regardless of gravity/contact settings.
+    if (!impl_->initialized) {
+        ecm.Each<components::Model, components::Name, components::ParentEntity>(
+            [&](const Entity & e,
+                const components::Model *,
+                const components::Name * n,
+                const components::ParentEntity * p) -> bool
+            {
+                if (!ecm.Component<components::World>(p->Data())) { return true; }
+                if (n->Data().rfind("box_", 0) != 0) { return true; }
+                gz::math::Pose3d pose = gz::sim::worldPose(e, ecm);
+                impl_->boxLockPoses[e] = pose;
+                upsertWorldPoseCmd(ecm, e, pose);
+                return true;
+            });
+        impl_->initialized = true;
+    }
+
     // Drain any pending service request
     std::unique_ptr<PendingOp> op;
     {
@@ -264,19 +306,18 @@ void GzLinkAttacher::PreUpdate(
         }
     }
 
-    // Apply kinematic constraint every step while attached
+    // Keep every non-attached box locked at its recorded pose.
+    for (auto & [entity, pose] : impl_->boxLockPoses) {
+        if (impl_->attached && entity == impl_->boxModelEntity) { continue; }
+        upsertWorldPoseCmd(ecm, entity, pose);
+    }
+
+    // Drive the attached box to follow the gripper link.
     if (!impl_->attached) { return; }
 
     gz::math::Pose3d gripperPose = gz::sim::worldPose(impl_->gripperLinkEntity, ecm);
     gz::math::Pose3d target = gripperPose * impl_->relativeTransform;
-
-    auto * cmd = ecm.Component<components::WorldPoseCmd>(impl_->boxModelEntity);
-    if (!cmd) {
-        ecm.CreateComponent(impl_->boxModelEntity,
-                            components::WorldPoseCmd(target));
-    } else {
-        cmd->Data() = target;
-    }
+    upsertWorldPoseCmd(ecm, impl_->boxModelEntity, target);
 }
 
 }  // namespace gz::sim::systems
