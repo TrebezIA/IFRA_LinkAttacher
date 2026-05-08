@@ -6,7 +6,9 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <gz/math/Pose3.hh>
 #include <gz/plugin/Register.hh>
@@ -123,11 +125,15 @@ struct GzLinkAttacherPrivate {
     bool initialized{false};
     std::unordered_map<Entity, gz::math::Pose3d> boxLockPoses;
 
-    // Active attachment state — only accessed in PreUpdate (single-threaded)
-    bool attached{false};
-    Entity gripperLinkEntity{kNullEntity};
-    Entity boxModelEntity{kNullEntity};
-    gz::math::Pose3d relativeTransform;
+    // Active attachments — each entry drives one box to follow one link every
+    // PreUpdate. Multiple attachments are supported simultaneously (e.g. a box
+    // on the gripper plus several boxes glued to the robot's cargo bin).
+    struct Attachment {
+        Entity linkEntity{kNullEntity};
+        Entity boxEntity{kNullEntity};
+        gz::math::Pose3d relativeTransform;
+    };
+    std::vector<Attachment> attachments;
 
     ~GzLinkAttacherPrivate()
     {
@@ -240,10 +246,24 @@ void GzLinkAttacher::processAttach(
     gz::math::Pose3d l1WorldPose = gz::sim::worldPose(l1, ecm);
     gz::math::Pose3d m2WorldPose = gz::sim::worldPose(m2, ecm);
 
-    impl_->gripperLinkEntity = l1;
-    impl_->boxModelEntity    = m2;
-    impl_->relativeTransform = l1WorldPose.Inverse() * m2WorldPose;
-    impl_->attached          = true;
+    GzLinkAttacherPrivate::Attachment a;
+    a.linkEntity        = l1;
+    a.boxEntity         = m2;
+    a.relativeTransform = l1WorldPose.Inverse() * m2WorldPose;
+
+    // If the same box is already attached somewhere, replace the existing entry
+    // (a box can only follow one link at a time).
+    bool replaced = false;
+    for (auto & existing : impl_->attachments) {
+        if (existing.boxEntity == m2) {
+            existing = a;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        impl_->attachments.push_back(a);
+    }
 
     op->promise.set_value({true,
         "Attached " + op->model2 + "::" + op->link2 +
@@ -254,17 +274,21 @@ void GzLinkAttacher::processAttach(
 void GzLinkAttacher::processDetach(
     EntityComponentManager & ecm, std::unique_ptr<PendingOp> op)
 {
-    if (impl_->attached && impl_->boxModelEntity != kNullEntity) {
-        // Record the final placed pose so the box stays where the arm put it.
-        gz::math::Pose3d gripperPose = gz::sim::worldPose(impl_->gripperLinkEntity, ecm);
-        gz::math::Pose3d finalPose = gripperPose * impl_->relativeTransform;
-        impl_->boxLockPoses[impl_->boxModelEntity] = finalPose;
+    Entity m2 = findTopLevelModel(ecm, op->model2);
+    for (auto it = impl_->attachments.begin(); it != impl_->attachments.end(); ++it) {
+        if (it->boxEntity == m2 && m2 != kNullEntity) {
+            // Record the final placed pose so the box stays where the arm put it.
+            gz::math::Pose3d linkPose = gz::sim::worldPose(it->linkEntity, ecm);
+            gz::math::Pose3d finalPose = linkPose * it->relativeTransform;
+            impl_->boxLockPoses[it->boxEntity] = finalPose;
+            impl_->attachments.erase(it);
+            op->promise.set_value({true,
+                "Detached " + op->model2 + "::" + op->link2});
+            return;
+        }
     }
-    impl_->attached          = false;
-    impl_->gripperLinkEntity = kNullEntity;
-    impl_->boxModelEntity    = kNullEntity;
-    op->promise.set_value({true,
-        "Detached " + op->model2 + "::" + op->link2});
+    op->promise.set_value({false,
+        "Detach: no active attachment for " + op->model2});
 }
 
 void GzLinkAttacher::PreUpdate(
@@ -306,18 +330,26 @@ void GzLinkAttacher::PreUpdate(
         }
     }
 
+    // Build the set of currently-attached boxes so we can skip them in the
+    // static-lock loop (their pose is driven by the attachment loop below).
+    std::unordered_set<Entity> attachedEntities;
+    attachedEntities.reserve(impl_->attachments.size());
+    for (const auto & a : impl_->attachments) {
+        attachedEntities.insert(a.boxEntity);
+    }
+
     // Keep every non-attached box locked at its recorded pose.
     for (auto & [entity, pose] : impl_->boxLockPoses) {
-        if (impl_->attached && entity == impl_->boxModelEntity) { continue; }
+        if (attachedEntities.count(entity)) { continue; }
         upsertWorldPoseCmd(ecm, entity, pose);
     }
 
-    // Drive the attached box to follow the gripper link.
-    if (!impl_->attached) { return; }
-
-    gz::math::Pose3d gripperPose = gz::sim::worldPose(impl_->gripperLinkEntity, ecm);
-    gz::math::Pose3d target = gripperPose * impl_->relativeTransform;
-    upsertWorldPoseCmd(ecm, impl_->boxModelEntity, target);
+    // Drive each attached box to follow its parent link.
+    for (const auto & a : impl_->attachments) {
+        gz::math::Pose3d linkPose = gz::sim::worldPose(a.linkEntity, ecm);
+        gz::math::Pose3d target = linkPose * a.relativeTransform;
+        upsertWorldPoseCmd(ecm, a.boxEntity, target);
+    }
 }
 
 }  // namespace gz::sim::systems

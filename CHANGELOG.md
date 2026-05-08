@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] - branch: jazzy
 
+### Changed
+
+- `gz_link_attacher.cpp`: support multiple simultaneous attachments. The
+  plugin previously kept a single `(linkEntity, boxEntity, relativeTransform)`
+  state, so each new `AttachLink` request silently replaced the previous
+  one. With cargo placement glueing several boxes to the robot
+  base_footprint, only the most recent box followed the base; the others
+  were left frozen at their last recorded world pose. Replaced with a
+  `std::vector<Attachment>`; PreUpdate drives every entry each step.
+  `processDetach` now matches by `model2` and removes only the relevant
+  attachment, recording its final placed pose into `boxLockPoses`.
+  Re-attaching the same box (model2 already in the list) replaces its
+  existing entry rather than duplicating it.
+
 ### Added
 
 - `ros2_LinkAttacher/include/ros2_linkattacher/gz_link_attacher.hpp`: new
