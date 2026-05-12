@@ -17,6 +17,7 @@
 
   <!-- Gazebo Harmonic; rosdep key varies by distro — gz-sim is provided by
        the ros-jazzy-ros-gz meta-package so no explicit rosdep entry needed. -->
+  <depend>gz_sim_vendor</depend>
 
   <export>
     <build_type>ament_cmake</build_type>
